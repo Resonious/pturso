@@ -839,6 +839,8 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 [[package]]
 name = "pmrpc"
 version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4593eafa0e174f98c571affc05e353fa64a7b2eb99b83e4c010d10d33dcd2822"
 dependencies = [
  "quote",
  "syn",
