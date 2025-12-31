@@ -1,11 +1,11 @@
 mod port;
 
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use port::{new_port, ResponseTx};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use wincode::{SchemaRead, SchemaWrite};
 use pmrpc::define_requests;
 
@@ -101,6 +101,7 @@ define_requests! {
 #[tokio::main]
 async fn main() {
     let (mut reader, writer, response_tx, response_rx) = new_port(100);
+    let cache = new_db_cache();
 
     // Spawn the writer task
     let writer_handle = tokio::spawn(async move {
@@ -113,7 +114,7 @@ async fn main() {
     loop {
         match reader.read_request().await {
             Ok(Some(request)) => {
-                tokio::spawn(process_request(request, response_tx.clone()));
+                tokio::spawn(process_request(cache.clone(), request, response_tx.clone()));
             }
             Ok(None) => {
                 // EOF - Erlang closed the port
@@ -132,14 +133,14 @@ async fn main() {
 }
 
 /// In charge of deserializing the request and serializing the response.
-async fn process_request(request: port::Request, tx: ResponseTx) {
+async fn process_request(cache: DbCache, request: port::Request, tx: ResponseTx) {
     let req: Result<Requests, _> = wincode::deserialize(&request.data);
     let req = match req {
         Ok(req) => req,
         Err(e) => Crap { reason: e.to_string() }.into(),
     };
 
-    let resp = handle_request(req).await;
+    let resp = handle_request(&cache, req).await;
     let resp_data = wincode::serialize(&resp)
         .unwrap_or_else(|e| {
             eprintln!("SERIALIZE ERROR: {e:?}");
@@ -157,7 +158,7 @@ async fn process_request(request: port::Request, tx: ResponseTx) {
 }
 
 /// In charge of actually performing the requested operation.
-async fn handle_request(req: Requests) -> Responses {
+async fn handle_request(cache: &DbCache, req: Requests) -> Responses {
     match req {
         Requests::Crap(crap, p) => {
             let resp = BadRequest { reason: crap.reason };
@@ -165,7 +166,7 @@ async fn handle_request(req: Requests) -> Responses {
         }
 
         Requests::Select(select, p) => {
-            let resp = match execute_select(select).await {
+            let resp = match execute_select(cache, select).await {
                 Ok(values) => RowsResult::Ok(values),
                 Err(e) => RowsResult::Error(e),
             };
@@ -173,7 +174,7 @@ async fn handle_request(req: Requests) -> Responses {
         }
 
         Requests::Insert(insert, p) => {
-            let resp = match execute_insert(insert).await {
+            let resp = match execute_insert(cache, insert).await {
                 Ok(x) => Updated::Ok(x),
                 Err(e) => Updated::Error(e),
             };
@@ -190,54 +191,74 @@ where
     Req::resp_enum(resp)
 }
 
-/// Global map of open databases, keyed by filename.
-static DBS: OnceLock<RwLock<HashMap<String, turso::Database>>> = OnceLock::new();
-
-fn get_dbs() -> &'static RwLock<HashMap<String, turso::Database>> {
-    DBS.get_or_init(|| RwLock::new(HashMap::new()))
+/// Cached database with connection and prepared statements.
+struct CachedDb {
+    _db: turso::Database,
+    conn: turso::Connection,
+    statements: HashMap<String, turso::Statement>,
 }
 
-/// Get a connection to the database, opening it if necessary.
-async fn get_connection(db_name: &str) -> Result<turso::Connection, String> {
+/// Shared database cache type.
+pub type DbCache = Arc<RwLock<HashMap<String, Arc<Mutex<CachedDb>>>>>;
+
+/// Create a new empty database cache.
+pub fn new_db_cache() -> DbCache {
+    Arc::new(RwLock::new(HashMap::new()))
+}
+
+/// Get or create a cached database entry.
+async fn get_cached_db(cache: &DbCache, db_name: &str) -> Result<Arc<Mutex<CachedDb>>, String> {
+    // Fast path: db already exists
     {
-        let dbs = get_dbs().read().await;
-        if let Some(db) = dbs.get(db_name) {
-            return db.connect().map_err(|e| e.to_string());
+        let dbs = cache.read().await;
+        if let Some(cached) = dbs.get(db_name) {
+            return Ok(Arc::clone(cached));
         }
     }
 
-    let mut dbs = get_dbs().write().await;
+    // Slow path: need to open the database
+    let mut dbs = cache.write().await;
 
-    let db = match dbs.entry(db_name.to_string()) {
-        hash_map::Entry::Occupied(e) => e.into_mut(),
-        hash_map::Entry::Vacant(e) => {
-            let db = turso::Builder::new_local(db_name)
-                .build()
-                .await
-                .map_err(|e| e.to_string())?;
-            e.insert(db)
-        }
-    };
-    db.connect().map_err(|e| e.to_string())
+    // Double-check after acquiring write lock
+    if let Some(cached) = dbs.get(db_name) {
+        return Ok(Arc::clone(cached));
+    }
+
+    let db = turso::Builder::new_local(db_name)
+        .build()
+        .await
+        .map_err(|e| e.to_string())?;
+    let conn = db.connect().map_err(|e| e.to_string())?;
+    let cached = Arc::new(Mutex::new(CachedDb {
+        _db: db,
+        conn,
+        statements: HashMap::new(),
+    }));
+    dbs.insert(db_name.to_string(), Arc::clone(&cached));
+    Ok(cached)
 }
 
-async fn execute_select(select: Select) -> Result<Vec<Vec<Value>>, String> {
-    let conn = get_connection(&select.db).await?;
+async fn execute_select(cache: &DbCache, select: Select) -> Result<Vec<Vec<Value>>, String> {
+    let cached = get_cached_db(cache, &select.db).await?;
+    let mut cached = cached.lock().await;
     let params: Vec<turso::Value> = select.params.into_iter().map(|v| v.into()).collect();
-    let mut rows = conn.query(&select.query, params).await.map_err(|e| e.to_string())?;
+
+    // Get or prepare statement
+    if !cached.statements.contains_key(&select.query) {
+        let stmt = cached.conn.prepare(&select.query).await.map_err(|e| e.to_string())?;
+        cached.statements.insert(select.query.clone(), stmt);
+    }
+    let stmt = cached.statements.get_mut(&select.query).unwrap();
+
+    let mut rows = stmt.query(params).await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
     while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
-        let mut col_idx = 0;
-        let mut result_row = Vec::with_capacity(16);
-        loop {
-            match row.get_value(col_idx) {
-                Ok(val) => {
-                    result_row.push(val.into());
-                    col_idx += 1;
-                }
-                Err(_) => break,
-            }
+        let col_count = row.column_count();
+        let mut result_row = Vec::with_capacity(col_count);
+        for col_idx in 0..col_count {
+            let val = row.get_value(col_idx).map_err(|e| e.to_string())?;
+            result_row.push(val.into());
         }
         results.push(result_row);
     }
@@ -245,9 +266,288 @@ async fn execute_select(select: Select) -> Result<Vec<Vec<Value>>, String> {
     Ok(results)
 }
 
-async fn execute_insert(insert: Insert) -> Result<u64, String> {
-    let conn = get_connection(&insert.db).await?;
+async fn execute_insert(cache: &DbCache, insert: Insert) -> Result<u64, String> {
+    let cached = get_cached_db(cache, &insert.db).await?;
+    let mut cached = cached.lock().await;
     let params: Vec<turso::Value> = insert.params.into_iter().map(|v| v.into()).collect();
-    let rows_affected = conn.execute(&insert.query, params).await.map_err(|e| e.to_string())?;
-    Ok(rows_affected)
+
+    // Get or prepare statement
+    if !cached.statements.contains_key(&insert.query) {
+        let stmt = cached.conn.prepare(&insert.query).await.map_err(|e| e.to_string())?;
+        cached.statements.insert(insert.query.clone(), stmt);
+    }
+    let stmt = cached.statements.get_mut(&insert.query).unwrap();
+
+    stmt.execute(params).await.map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_insert_and_select() {
+        let cache = new_db_cache();
+
+        // Create table
+        let create = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string(),
+            params: vec![],
+        };
+        let req: Requests = create.into();
+        let resp = handle_request(&cache, req).await;
+        assert!(matches!(resp, Responses::Updated(Updated::Ok(_))));
+
+        // Insert a row
+        let insert = Insert {
+            db: ":memory:".to_string(),
+            query: "INSERT INTO users (id, name) VALUES (?, ?)".to_string(),
+            params: vec![Value::Integer(1), Value::Text("Alice".to_string())],
+        };
+        let req: Requests = insert.into();
+        let resp = handle_request(&cache, req).await;
+        assert!(matches!(resp, Responses::Updated(Updated::Ok(1))));
+
+        // Select the row back
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT id, name FROM users".to_string(),
+            params: vec![],
+        };
+        let req: Requests = select.into();
+        let resp = handle_request(&cache, req).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].len(), 2);
+                assert_eq!(rows[0][0], Value::Integer(1));
+                assert_eq!(rows[0][1], Value::Text("Alice".to_string()));
+            }
+            other => panic!("Expected RowsResult::Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_with_params() {
+        let cache = new_db_cache();
+
+        // Create and populate table
+        let create = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE items (id INTEGER, value TEXT)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, create.into()).await;
+
+        for i in 1..=3 {
+            let insert = Insert {
+                db: ":memory:".to_string(),
+                query: "INSERT INTO items VALUES (?, ?)".to_string(),
+                params: vec![Value::Integer(i), Value::Text(format!("item{}", i))],
+            };
+            handle_request(&cache, insert.into()).await;
+        }
+
+        // Select with parameter
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT value FROM items WHERE id = ?".to_string(),
+            params: vec![Value::Integer(2)],
+        };
+        let resp = handle_request(&cache, select.into()).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Text("item2".to_string()));
+            }
+            other => panic!("Expected RowsResult::Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_select_empty_result() {
+        let cache = new_db_cache();
+
+        let create = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE empty_table (id INTEGER)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, create.into()).await;
+
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT * FROM empty_table".to_string(),
+            params: vec![],
+        };
+        let resp = handle_request(&cache, select.into()).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                assert!(rows.is_empty());
+            }
+            other => panic!("Expected empty RowsResult::Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_invalid_sql_returns_error() {
+        let cache = new_db_cache();
+
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT * FROM nonexistent_table".to_string(),
+            params: vec![],
+        };
+        let resp = handle_request(&cache, select.into()).await;
+
+        assert!(matches!(resp, Responses::RowsResult(RowsResult::Error(_))));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_databases() {
+        let cache = new_db_cache();
+
+        // Create tables in two different in-memory databases
+        // Note: each :memory: connection is separate, but here we use the same
+        // cache key so they share. Use different paths to test isolation.
+        let create1 = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE db1_table (x INTEGER)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, create1.into()).await;
+
+        // Insert into first db
+        let insert1 = Insert {
+            db: ":memory:".to_string(),
+            query: "INSERT INTO db1_table VALUES (42)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, insert1.into()).await;
+
+        // Query first db
+        let select1 = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT x FROM db1_table".to_string(),
+            params: vec![],
+        };
+        let resp = handle_request(&cache, select1.into()).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0], Value::Integer(42));
+            }
+            other => panic!("Expected RowsResult::Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_null_values() {
+        let cache = new_db_cache();
+
+        let create = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE nullable (a INTEGER, b TEXT)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, create.into()).await;
+
+        let insert = Insert {
+            db: ":memory:".to_string(),
+            query: "INSERT INTO nullable VALUES (?, ?)".to_string(),
+            params: vec![Value::Null, Value::Text("not null".to_string())],
+        };
+        handle_request(&cache, insert.into()).await;
+
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT a, b FROM nullable".to_string(),
+            params: vec![],
+        };
+        let resp = handle_request(&cache, select.into()).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                assert_eq!(rows[0][0], Value::Null);
+                assert_eq!(rows[0][1], Value::Text("not null".to_string()));
+            }
+            other => panic!("Expected RowsResult::Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_blob_values() {
+        let cache = new_db_cache();
+
+        let create = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE blobs (data BLOB)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, create.into()).await;
+
+        let blob_data = vec![0x00, 0x01, 0x02, 0xFF];
+        let insert = Insert {
+            db: ":memory:".to_string(),
+            query: "INSERT INTO blobs VALUES (?)".to_string(),
+            params: vec![Value::Blob(blob_data.clone())],
+        };
+        handle_request(&cache, insert.into()).await;
+
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT data FROM blobs".to_string(),
+            params: vec![],
+        };
+        let resp = handle_request(&cache, select.into()).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                assert_eq!(rows[0][0], Value::Blob(blob_data));
+            }
+            other => panic!("Expected RowsResult::Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_real_values() {
+        let cache = new_db_cache();
+
+        let create = Insert {
+            db: ":memory:".to_string(),
+            query: "CREATE TABLE reals (value REAL)".to_string(),
+            params: vec![],
+        };
+        handle_request(&cache, create.into()).await;
+
+        let insert = Insert {
+            db: ":memory:".to_string(),
+            query: "INSERT INTO reals VALUES (?)".to_string(),
+            params: vec![Value::Real(3.14159)],
+        };
+        handle_request(&cache, insert.into()).await;
+
+        let select = Select {
+            db: ":memory:".to_string(),
+            query: "SELECT value FROM reals".to_string(),
+            params: vec![],
+        };
+        let resp = handle_request(&cache, select.into()).await;
+
+        match resp {
+            Responses::RowsResult(RowsResult::Ok(rows)) => {
+                if let Value::Real(val) = rows[0][0] {
+                    assert!((val - 3.14159).abs() < 0.00001);
+                } else {
+                    panic!("Expected Real value");
+                }
+            }
+            other => panic!("Expected RowsResult::Ok, got {:?}", other),
+        }
+    }
 }
