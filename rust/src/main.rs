@@ -26,7 +26,7 @@ pub struct Select {
 }
 
 #[derive(Debug, SchemaRead, SchemaWrite)]
-pub struct Insert {
+pub struct Execute {
     pub db: String,
     pub query: String,
     pub params: Vec<Value>,
@@ -95,7 +95,7 @@ define_requests! {
 
     Crap => BadRequest,
     Select => RowsResult,
-    Insert => Updated,
+    Execute => Updated,
 }
 
 #[tokio::main]
@@ -173,8 +173,8 @@ async fn handle_request(cache: &DbCache, req: Requests) -> Responses {
             response_enum(p, resp)
         }
 
-        Requests::Insert(insert, p) => {
-            let resp = match execute_insert(cache, insert).await {
+        Requests::Execute(execute, p) => {
+            let resp = match execute_statement(cache, execute).await {
                 Ok(x) => Updated::Ok(x),
                 Err(e) => Updated::Error(e),
             };
@@ -266,17 +266,17 @@ async fn execute_select(cache: &DbCache, select: Select) -> Result<Vec<Vec<Value
     Ok(results)
 }
 
-async fn execute_insert(cache: &DbCache, insert: Insert) -> Result<u64, String> {
-    let cached = get_cached_db(cache, &insert.db).await?;
+async fn execute_statement(cache: &DbCache, execute: Execute) -> Result<u64, String> {
+    let cached = get_cached_db(cache, &execute.db).await?;
     let mut cached = cached.lock().await;
-    let params: Vec<turso::Value> = insert.params.into_iter().map(|v| v.into()).collect();
+    let params: Vec<turso::Value> = execute.params.into_iter().map(|v| v.into()).collect();
 
     // Get or prepare statement
-    if !cached.statements.contains_key(&insert.query) {
-        let stmt = cached.conn.prepare(&insert.query).await.map_err(|e| e.to_string())?;
-        cached.statements.insert(insert.query.clone(), stmt);
+    if !cached.statements.contains_key(&execute.query) {
+        let stmt = cached.conn.prepare(&execute.query).await.map_err(|e| e.to_string())?;
+        cached.statements.insert(execute.query.clone(), stmt);
     }
-    let stmt = cached.statements.get_mut(&insert.query).unwrap();
+    let stmt = cached.statements.get_mut(&execute.query).unwrap();
 
     stmt.execute(params).await.map_err(|e| e.to_string())
 }
@@ -290,7 +290,7 @@ mod tests {
         let cache = new_db_cache();
 
         // Create table
-        let create = Insert {
+        let create = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)".to_string(),
             params: vec![],
@@ -300,7 +300,7 @@ mod tests {
         assert!(matches!(resp, Responses::Updated(Updated::Ok(_))));
 
         // Insert a row
-        let insert = Insert {
+        let insert = Execute {
             db: ":memory:".to_string(),
             query: "INSERT INTO users (id, name) VALUES (?, ?)".to_string(),
             params: vec![Value::Integer(1), Value::Text("Alice".to_string())],
@@ -334,7 +334,7 @@ mod tests {
         let cache = new_db_cache();
 
         // Create and populate table
-        let create = Insert {
+        let create = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE items (id INTEGER, value TEXT)".to_string(),
             params: vec![],
@@ -342,7 +342,7 @@ mod tests {
         handle_request(&cache, create.into()).await;
 
         for i in 1..=3 {
-            let insert = Insert {
+            let insert = Execute {
                 db: ":memory:".to_string(),
                 query: "INSERT INTO items VALUES (?, ?)".to_string(),
                 params: vec![Value::Integer(i), Value::Text(format!("item{}", i))],
@@ -371,7 +371,7 @@ mod tests {
     async fn test_select_empty_result() {
         let cache = new_db_cache();
 
-        let create = Insert {
+        let create = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE empty_table (id INTEGER)".to_string(),
             params: vec![],
@@ -414,7 +414,7 @@ mod tests {
         // Create tables in two different in-memory databases
         // Note: each :memory: connection is separate, but here we use the same
         // cache key so they share. Use different paths to test isolation.
-        let create1 = Insert {
+        let create1 = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE db1_table (x INTEGER)".to_string(),
             params: vec![],
@@ -422,7 +422,7 @@ mod tests {
         handle_request(&cache, create1.into()).await;
 
         // Insert into first db
-        let insert1 = Insert {
+        let insert1 = Execute {
             db: ":memory:".to_string(),
             query: "INSERT INTO db1_table VALUES (42)".to_string(),
             params: vec![],
@@ -450,14 +450,14 @@ mod tests {
     async fn test_null_values() {
         let cache = new_db_cache();
 
-        let create = Insert {
+        let create = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE nullable (a INTEGER, b TEXT)".to_string(),
             params: vec![],
         };
         handle_request(&cache, create.into()).await;
 
-        let insert = Insert {
+        let insert = Execute {
             db: ":memory:".to_string(),
             query: "INSERT INTO nullable VALUES (?, ?)".to_string(),
             params: vec![Value::Null, Value::Text("not null".to_string())],
@@ -484,7 +484,7 @@ mod tests {
     async fn test_blob_values() {
         let cache = new_db_cache();
 
-        let create = Insert {
+        let create = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE blobs (data BLOB)".to_string(),
             params: vec![],
@@ -492,7 +492,7 @@ mod tests {
         handle_request(&cache, create.into()).await;
 
         let blob_data = vec![0x00, 0x01, 0x02, 0xFF];
-        let insert = Insert {
+        let insert = Execute {
             db: ":memory:".to_string(),
             query: "INSERT INTO blobs VALUES (?)".to_string(),
             params: vec![Value::Blob(blob_data.clone())],
@@ -518,14 +518,14 @@ mod tests {
     async fn test_real_values() {
         let cache = new_db_cache();
 
-        let create = Insert {
+        let create = Execute {
             db: ":memory:".to_string(),
             query: "CREATE TABLE reals (value REAL)".to_string(),
             params: vec![],
         };
         handle_request(&cache, create.into()).await;
 
-        let insert = Insert {
+        let insert = Execute {
             db: ":memory:".to_string(),
             query: "INSERT INTO reals VALUES (?)".to_string(),
             params: vec![Value::Real(3.14159)],

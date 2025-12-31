@@ -1,0 +1,25 @@
+[tasks.test]
+description = "Run all tests (Rust, Erlang, Gleam)"
+depends = ["test:rust", "test:gleam"]
+
+[tasks."test:rust"]
+description = "Run Rust tests"
+dir = "rust"
+run = "cargo test"
+
+[tasks."test:gleam"]
+description = "Run Gleam and Erlang tests"
+run = "gleam test"
+
+[tasks.build]
+description = "Build everything"
+depends = ["build:rust", "build:gleam"]
+
+[tasks."build:rust"]
+description = "Build Rust binary"
+dir = "rust"
+run = "cargo build"
+
+[tasks."build:gleam"]
+description = "Build Gleam project"
+run = "gleam build"
