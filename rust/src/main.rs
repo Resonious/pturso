@@ -1,10 +1,12 @@
 mod port;
 
+use std::collections::{HashMap, hash_map};
 use std::marker::PhantomData;
+use std::sync::OnceLock;
 
 use port::{new_port, ResponseTx};
+use tokio::sync::RwLock;
 use wincode::{SchemaRead, SchemaWrite};
-use tokio::sync::mpsc::{channel, Sender, Receiver};
 use pmrpc::define_requests;
 
 #[derive(Debug, SchemaRead, SchemaWrite)]
@@ -24,8 +26,21 @@ pub struct Select {
 }
 
 #[derive(Debug, SchemaRead, SchemaWrite)]
+pub struct Insert {
+    pub db: String,
+    pub query: String,
+    pub params: Vec<Value>,
+}
+
+#[derive(Debug, SchemaRead, SchemaWrite)]
+pub enum Updated {
+    Ok(u64),
+    Error(String),
+}
+
+#[derive(Debug, SchemaRead, SchemaWrite)]
 pub enum RowsResult {
-    Ok(Vec<Value>),
+    Ok(Vec<Vec<Value>>),
     Error(String),
 }
 
@@ -80,6 +95,7 @@ define_requests! {
 
     Crap => BadRequest,
     Select => RowsResult,
+    Insert => Updated,
 }
 
 #[tokio::main]
@@ -148,7 +164,21 @@ async fn handle_request(req: Requests) -> Responses {
             response_enum(p, resp)
         }
 
-        _ => todo!()
+        Requests::Select(select, p) => {
+            let resp = match execute_select(select).await {
+                Ok(values) => RowsResult::Ok(values),
+                Err(e) => RowsResult::Error(e),
+            };
+            response_enum(p, resp)
+        }
+
+        Requests::Insert(insert, p) => {
+            let resp = match execute_insert(insert).await {
+                Ok(x) => Updated::Ok(x),
+                Err(e) => Updated::Error(e),
+            };
+            response_enum(p, resp)
+        }
     }
 }
 
@@ -158,4 +188,66 @@ where
     Resp: Send,
 {
     Req::resp_enum(resp)
+}
+
+/// Global map of open databases, keyed by filename.
+static DBS: OnceLock<RwLock<HashMap<String, turso::Database>>> = OnceLock::new();
+
+fn get_dbs() -> &'static RwLock<HashMap<String, turso::Database>> {
+    DBS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Get a connection to the database, opening it if necessary.
+async fn get_connection(db_name: &str) -> Result<turso::Connection, String> {
+    {
+        let dbs = get_dbs().read().await;
+        if let Some(db) = dbs.get(db_name) {
+            return db.connect().map_err(|e| e.to_string());
+        }
+    }
+
+    let mut dbs = get_dbs().write().await;
+
+    let db = match dbs.entry(db_name.to_string()) {
+        hash_map::Entry::Occupied(e) => e.into_mut(),
+        hash_map::Entry::Vacant(e) => {
+            let db = turso::Builder::new_local(db_name)
+                .build()
+                .await
+                .map_err(|e| e.to_string())?;
+            e.insert(db)
+        }
+    };
+    db.connect().map_err(|e| e.to_string())
+}
+
+async fn execute_select(select: Select) -> Result<Vec<Vec<Value>>, String> {
+    let conn = get_connection(&select.db).await?;
+    let params: Vec<turso::Value> = select.params.into_iter().map(|v| v.into()).collect();
+    let mut rows = conn.query(&select.query, params).await.map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+    while let Some(row) = rows.next().await.map_err(|e| e.to_string())? {
+        let mut col_idx = 0;
+        let mut result_row = Vec::with_capacity(16);
+        loop {
+            match row.get_value(col_idx) {
+                Ok(val) => {
+                    result_row.push(val.into());
+                    col_idx += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        results.push(result_row);
+    }
+
+    Ok(results)
+}
+
+async fn execute_insert(insert: Insert) -> Result<u64, String> {
+    let conn = get_connection(&insert.db).await?;
+    let params: Vec<turso::Value> = insert.params.into_iter().map(|v| v.into()).collect();
+    let rows_affected = conn.execute(&insert.query, params).await.map_err(|e| e.to_string())?;
+    Ok(rows_affected)
 }
