@@ -2,6 +2,10 @@
 name = "erso"
 version = "0.1.0"
 edition = "2024"
+authors = ["Nigel Baillie <nigel@baillie.dev>"]
+description = "Bridge program that allows Erlang to access Turso databases. Built for the pturso Gleam library."
+license-file = "LICENSE.txt"
+repository = "https://github.com/Resonious/pturso"
 
 [dependencies]
 pmrpc = "2.0.0"
