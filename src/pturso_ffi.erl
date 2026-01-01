@@ -5,7 +5,8 @@
     start/1,
     stop/1,
     select/4,
-    execute/4
+    execute/4,
+    run/3
 ]).
 
 %%====================================================================
@@ -33,7 +34,8 @@ select({connection, Pid}, Db, Query, Params) ->
     Request = {select, Db, Query, ErlParams},
     case pturso_port:call(Pid, Request) of
         {rows_result, {ok, Rows}} ->
-            DynamicRows = [[erl_value_to_dynamic(V) || V <- Row] || Row <- Rows],
+            %% Return rows as tuples so decode.field(index, decoder) works
+            DynamicRows = [list_to_tuple([erl_value_to_dynamic(V) || V <- Row]) || Row <- Rows],
             {ok, DynamicRows};
         {rows_result, {error, Reason}} ->
             {error, Reason};
@@ -50,6 +52,18 @@ execute({connection, Pid}, Db, Query, Params) ->
         {updated, {ok, Count}} ->
             {ok, Count};
         {updated, {error, Reason}} ->
+            {error, Reason};
+        {bad_request, Reason} ->
+            {error, Reason}
+    end.
+
+-spec run({connection, pid()}, binary(), binary()) -> {ok, nil} | {error, binary()}.
+run({connection, Pid}, Db, Sql) ->
+    Request = {run, Db, Sql},
+    case pturso_port:call(Pid, Request) of
+        {run_result, ok} ->
+            {ok, nil};
+        {run_result, {error, Reason}} ->
             {error, Reason};
         {bad_request, Reason} ->
             {error, Reason}

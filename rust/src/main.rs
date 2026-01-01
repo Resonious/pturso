@@ -33,6 +33,18 @@ pub struct Execute {
 }
 
 #[derive(Debug, SchemaRead, SchemaWrite)]
+pub struct Run {
+    pub db: String,
+    pub sql: String,
+}
+
+#[derive(Debug, SchemaRead, SchemaWrite)]
+pub enum RunResult {
+    Ok,
+    Error(String),
+}
+
+#[derive(Debug, SchemaRead, SchemaWrite)]
 pub enum Updated {
     Ok(u64),
     Error(String),
@@ -96,6 +108,7 @@ define_requests! {
     Crap => BadRequest,
     Select => RowsResult,
     Execute => Updated,
+    Run => RunResult,
 }
 
 #[tokio::main]
@@ -177,6 +190,14 @@ async fn handle_request(cache: &DbCache, req: Requests) -> Responses {
             let resp = match execute_statement(cache, execute).await {
                 Ok(x) => Updated::Ok(x),
                 Err(e) => Updated::Error(e),
+            };
+            response_enum(p, resp)
+        }
+
+        Requests::Run(run, p) => {
+            let resp = match run_batch(cache, run).await {
+                Ok(()) => RunResult::Ok,
+                Err(e) => RunResult::Error(e),
             };
             response_enum(p, resp)
         }
@@ -279,6 +300,12 @@ async fn execute_statement(cache: &DbCache, execute: Execute) -> Result<u64, Str
     let stmt = cached.statements.get_mut(&execute.query).unwrap();
 
     stmt.execute(params).await.map_err(|e| e.to_string())
+}
+
+async fn run_batch(cache: &DbCache, run: Run) -> Result<(), String> {
+    let cached = get_cached_db(cache, &run.db).await?;
+    let cached = cached.lock().await;
+    cached.conn.execute_batch(&run.sql).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

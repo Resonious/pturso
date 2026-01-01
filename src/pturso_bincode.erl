@@ -149,13 +149,14 @@ decode_value(<<4:32/little-unsigned, Rest/binary>>) ->
 
 %%====================================================================
 %% Request Encoding
-%% Rust: enum Requests { Crap=0, Select=1, Insert=2 }
+%% Rust: enum Requests { Crap=0, Select=1, Execute=2, Run=3 }
 %%====================================================================
 
 -type crap_request() :: {crap, binary()}.
 -type select_request() :: {select, binary(), binary(), [value()]}.
 -type insert_request() :: {insert, binary(), binary(), [value()]}.
--type request() :: crap_request() | select_request() | insert_request().
+-type run_request() :: {run, binary(), binary()}.
+-type request() :: crap_request() | select_request() | insert_request() | run_request().
 
 -spec encode_request(request()) -> binary().
 encode_request({crap, Reason}) ->
@@ -171,22 +172,29 @@ encode_request({select, Db, Query, Params}) ->
       ParamsBin/binary>>;
 
 encode_request({insert, Db, Query, Params}) ->
-    %% Requests::Insert(Insert { db, query, params })
+    %% Requests::Execute(Execute { db, query, params })
     ParamsBin = encode_vec(fun encode_value/1, Params),
     <<(encode_u32(2))/binary,
       (encode_string(Db))/binary,
       (encode_string(Query))/binary,
-      ParamsBin/binary>>.
+      ParamsBin/binary>>;
+
+encode_request({run, Db, Sql}) ->
+    %% Requests::Run(Run { db, sql })
+    <<(encode_u32(3))/binary,
+      (encode_string(Db))/binary,
+      (encode_string(Sql))/binary>>.
 
 %%====================================================================
 %% Response Decoding
-%% Rust: enum Responses { BadRequest=0, RowsResult=1, Updated=2 }
+%% Rust: enum Responses { BadRequest=0, RowsResult=1, Updated=2, RunResult=3 }
 %%====================================================================
 
 -type bad_request_response() :: {bad_request, binary()}.
 -type rows_result_response() :: {rows_result, {ok, [[value()]]} | {error, binary()}}.
 -type updated_response() :: {updated, {ok, non_neg_integer()} | {error, binary()}}.
--type response() :: bad_request_response() | rows_result_response() | updated_response().
+-type run_result_response() :: {run_result, ok | {error, binary()}}.
+-type response() :: bad_request_response() | rows_result_response() | updated_response() | run_result_response().
 
 -spec decode_response(binary()) -> response().
 decode_response(<<0:32/little-unsigned, Rest/binary>>) ->
@@ -200,7 +208,11 @@ decode_response(<<1:32/little-unsigned, Rest/binary>>) ->
 
 decode_response(<<2:32/little-unsigned, Rest/binary>>) ->
     %% Updated: enum { Ok(u64)=0, Error(String)=1 }
-    decode_updated(Rest).
+    decode_updated(Rest);
+
+decode_response(<<3:32/little-unsigned, Rest/binary>>) ->
+    %% RunResult: enum { Ok=0, Error(String)=1 }
+    decode_run_result(Rest).
 
 decode_rows_result(<<0:32/little-unsigned, Rest/binary>>) ->
     %% RowsResult::Ok(Vec<Vec<Value>>)
@@ -221,3 +233,11 @@ decode_updated(<<1:32/little-unsigned, Rest/binary>>) ->
     %% Updated::Error(String)
     {Reason, <<>>} = decode_string(Rest),
     {updated, {error, Reason}}.
+
+decode_run_result(<<0:32/little-unsigned, _Rest/binary>>) ->
+    %% RunResult::Ok
+    {run_result, ok};
+decode_run_result(<<1:32/little-unsigned, Rest/binary>>) ->
+    %% RunResult::Error(String)
+    {Reason, <<>>} = decode_string(Rest),
+    {run_result, {error, Reason}}.
