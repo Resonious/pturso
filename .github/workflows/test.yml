@@ -12,12 +12,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: erlef/setup-beam@v1
         with:
           otp-version: "28"
           gleam-version: "1.14.0"
           rebar3-version: "3"
-          # elixir-version: "1"
-      - run: gleam deps download
-      - run: gleam test
-      - run: gleam format --check src test
+
+      - name: Run Rust tests
+        working-directory: rust
+        run: cargo test
+
+      - name: Build Rust binary
+        working-directory: rust
+        run: cargo build
+
+      - name: Download Gleam dependencies
+        run: gleam deps download
+
+      - name: Run Gleam tests
+        run: gleam test
