@@ -12,16 +12,27 @@ pub type Param {
   Blob(BitArray)
 }
 
+pub type LogEntry {
+  LogEntry(sql: String, duration_ms: Int)
+}
+
 pub type Port
 
 pub type Connection {
-  Connection(port: Port, db: String)
+  Connection(
+    port: Port,
+    db: String,
+    logger_fn: fn(LogEntry) -> Nil,
+  )
 }
 
 pub type Error {
   DatabaseError(message: String)
   DecodeError(errors: List(decode.DecodeError))
 }
+
+@external(erlang, "pturso_ffi", "now_ms")
+fn now_ms() -> Int
 
 @external(erlang, "pturso_ffi", "start")
 pub fn start(binary_path: String) -> Result(Port, String)
@@ -63,8 +74,8 @@ pub fn run(conn: Port, db: String, sql: String) -> Result(Nil, String)
 /// queries come in.
 /// This is useful if you want to use the sqlight-compatible
 /// query and exec functions.
-pub fn connect(port: Port, to db: String) -> Connection {
-  Connection(port:, db:)
+pub fn connect(port: Port, to db: String, log_with logger_fn: fn(LogEntry) -> Nil) -> Connection {
+  Connection(port:, db:, logger_fn:)
 }
 
 /// sqlight-compatible query function.
@@ -74,12 +85,19 @@ pub fn query(
   with params: List(Param),
   expecting decoder: decode.Decoder(a),
 ) -> Result(List(a), Error) {
+  let before = now_ms()
+
   use rows <- try(select(
     conn.port,
     conn.db,
     sql,
     params,
-  ) |> result.map_error(DatabaseError))
+  ) |> result.map_error(fn(error) {
+    conn.logger_fn(LogEntry(sql:, duration_ms: now_ms() - before))
+    DatabaseError(error)
+  }))
+
+  conn.logger_fn(LogEntry(sql:, duration_ms: now_ms() - before))
 
   let decoded = list.map(rows, decode.run(_, decoder))
 
@@ -109,6 +127,12 @@ pub fn exec(
   sql: String,
   on conn: Connection,
 ) -> Result(Nil, Error) {
-  run(conn.port, conn.db, sql)
+  let before = now_ms()
+
+  let return = run(conn.port, conn.db, sql)
   |> result.map_error(DatabaseError)
+
+  conn.logger_fn(LogEntry(sql:, duration_ms: now_ms() - before))
+
+  return
 }

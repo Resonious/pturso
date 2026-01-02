@@ -4,6 +4,7 @@
 -export([
     start/1,
     stop/1,
+    now_ms/0,
     select/4,
     execute/4,
     run/3
@@ -26,6 +27,9 @@ start(BinaryPath) when is_binary(BinaryPath) ->
 stop({connection, Pid}) ->
     pturso_port:stop(Pid),
     nil.
+
+-spec now_ms() -> integer().
+now_ms() -> erlang:monotonic_time(millisecond).
 
 -spec select({connection, pid()}, binary(), binary(), list()) ->
     {ok, list()} | {error, binary()}.
