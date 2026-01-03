@@ -271,6 +271,9 @@ async fn execute_select(cache: &DbCache, select: Select) -> Result<Vec<Vec<Value
     }
     let stmt = cached.statements.get_mut(&select.query).unwrap();
 
+    // Reset statement before reuse (query() doesn't do this automatically, unlike execute())
+    stmt.reset();
+
     let mut rows = stmt.query(params).await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();

@@ -227,3 +227,47 @@ pub fn exec_with_connection_test() {
   should.equal(dogs, [#("Max", 3), #("Rex", 5)])
   pturso.stop(port)
 }
+
+// Regression test: multiple query() calls for INSERT should all run
+// This was a bug where stmt.reset() wasn't called before query()
+pub fn multiple_insert_via_query_test() {
+  let assert Ok(port) = pturso.start(binary_path)
+  let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
+
+  // Create table
+  let assert Ok(Nil) = pturso.exec("CREATE TABLE items (id INTEGER, value TEXT)", on: conn)
+
+  // Insert multiple rows using query() - this is how sqlight API works
+  let empty_decoder = decode.success(Nil)
+
+  let assert Ok([]) =
+    pturso.query("INSERT INTO items VALUES (?, ?)", on: conn, with: [
+      pturso.Int(1),
+      pturso.String("first"),
+    ], expecting: empty_decoder)
+
+  let assert Ok([]) =
+    pturso.query("INSERT INTO items VALUES (?, ?)", on: conn, with: [
+      pturso.Int(2),
+      pturso.String("second"),
+    ], expecting: empty_decoder)
+
+  let assert Ok([]) =
+    pturso.query("INSERT INTO items VALUES (?, ?)", on: conn, with: [
+      pturso.Int(3),
+      pturso.String("third"),
+    ], expecting: empty_decoder)
+
+  // Verify all rows were inserted
+  let item_decoder = {
+    use id <- decode.field(0, decode.int)
+    use value <- decode.field(1, decode.string)
+    decode.success(#(id, value))
+  }
+
+  let assert Ok(items) =
+    pturso.query("SELECT id, value FROM items ORDER BY id", on: conn, with: [], expecting: item_decoder)
+
+  should.equal(items, [#(1, "first"), #(2, "second"), #(3, "third")])
+  pturso.stop(port)
+}
