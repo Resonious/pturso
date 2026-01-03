@@ -310,6 +310,7 @@ dependencies = [
 name = "erso"
 version = "0.1.0"
 dependencies = [
+ "aegis",
  "pmrpc",
  "tokio",
  "turso",
