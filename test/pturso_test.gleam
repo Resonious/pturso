@@ -201,7 +201,7 @@ pub fn run_multiple_statements_test() {
 
 pub fn exec_with_connection_test() {
   let assert Ok(port) = pturso.start(binary_path)
-  let conn = pturso.connect(port, to: ":memory:")
+  let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
 
   // Use exec to run multiple statements
   let assert Ok(Nil) =
