@@ -62,15 +62,20 @@ call(Pid, Request, Timeout) ->
 %%====================================================================
 
 init({BinaryPath, _Options}) ->
-    Port = open_port(
+    try open_port(
         {spawn_executable, BinaryPath},
         [binary, {packet, 4}, exit_status, use_stdio]
-    ),
-    {ok, #state{
-        port = Port,
-        next_id = 1,
-        pending = #{}
-    }}.
+    ) of
+        Port ->
+            {ok, #state{
+                port = Port,
+                next_id = 1,
+                pending = #{}
+            }}
+    catch
+        error:Reason ->
+            {stop, Reason}
+    end.
 
 handle_call({call, Request}, From, State) ->
     #state{port = Port, next_id = Id, pending = Pending} = State,
