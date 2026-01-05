@@ -10,21 +10,32 @@
     run/3
 ]).
 
+-define(ETS_TABLE, pturso_ports).
+
 %%====================================================================
 %% API
 %%====================================================================
 
 -spec start(binary()) -> {ok, {connection, pid()}} | {error, binary()}.
 start(BinaryPath) when is_binary(BinaryPath) ->
-    case pturso_port:start_link(binary_to_list(BinaryPath)) of
-        {ok, Pid} ->
-            {ok, {connection, Pid}};
-        {error, Reason} ->
-            {error, list_to_binary(io_lib:format("~p", [Reason]))}
+    ensure_ets_table(),
+    case ets:lookup(?ETS_TABLE, BinaryPath) of
+        [{_, Pid}] ->
+            case is_process_alive(Pid) of
+                true ->
+                    {ok, {connection, Pid}};
+                false ->
+                    ets:delete(?ETS_TABLE, BinaryPath),
+                    start_new_port(BinaryPath)
+            end;
+        [] ->
+            start_new_port(BinaryPath)
     end.
 
 -spec stop({connection, pid()}) -> nil.
 stop({connection, Pid}) ->
+    %% Remove from ETS if present
+    ets:match_delete(?ETS_TABLE, {'_', Pid}),
     pturso_port:stop(Pid),
     nil.
 
@@ -76,6 +87,23 @@ run({connection, Pid}, Db, Sql) ->
 %%====================================================================
 %% Internal functions
 %%====================================================================
+
+ensure_ets_table() ->
+    case ets:whereis(?ETS_TABLE) of
+        undefined ->
+            ets:new(?ETS_TABLE, [set, public, named_table]);
+        _ ->
+            ok
+    end.
+
+start_new_port(BinaryPath) ->
+    case pturso_port:start_link(binary_to_list(BinaryPath)) of
+        {ok, Pid} ->
+            ets:insert(?ETS_TABLE, {BinaryPath, Pid}),
+            {ok, {connection, Pid}};
+        {error, Reason} ->
+            {error, list_to_binary(io_lib:format("~p", [Reason]))}
+    end.
 
 %% Convert Gleam Param to Erlang bincode value
 gleam_param_to_erl(null) -> null;
