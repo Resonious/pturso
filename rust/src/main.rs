@@ -244,7 +244,6 @@ async fn get_cached_db(cache: &DbCache, db_name: &str) -> Result<Arc<CachedDb>, 
     }
 
     let db = turso::Builder::new_local(db_name)
-        .with_mvcc(false)
         .build()
         .await
         .map_err(|e| e.to_string())?;
