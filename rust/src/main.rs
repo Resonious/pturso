@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use port::{new_port, ResponseTx};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use wincode::{SchemaRead, SchemaWrite};
 use pmrpc::define_requests;
 
@@ -212,15 +212,13 @@ where
     Req::resp_enum(resp)
 }
 
-/// Cached database with connection and prepared statements.
+/// Cached database.
 struct CachedDb {
-    _db: turso::Database,
-    conn: turso::Connection,
-    statements: HashMap<String, turso::Statement>,
+    db: turso::Database,
 }
 
 /// Shared database cache type.
-pub type DbCache = Arc<RwLock<HashMap<String, Arc<Mutex<CachedDb>>>>>;
+pub type DbCache = Arc<RwLock<HashMap<String, Arc<CachedDb>>>>;
 
 /// Create a new empty database cache.
 pub fn new_db_cache() -> DbCache {
@@ -228,7 +226,7 @@ pub fn new_db_cache() -> DbCache {
 }
 
 /// Get or create a cached database entry.
-async fn get_cached_db(cache: &DbCache, db_name: &str) -> Result<Arc<Mutex<CachedDb>>, String> {
+async fn get_cached_db(cache: &DbCache, db_name: &str) -> Result<Arc<CachedDb>, String> {
     // Fast path: db already exists
     {
         let dbs = cache.read().await;
@@ -246,34 +244,21 @@ async fn get_cached_db(cache: &DbCache, db_name: &str) -> Result<Arc<Mutex<Cache
     }
 
     let db = turso::Builder::new_local(db_name)
+        .with_mvcc(true)
         .build()
         .await
         .map_err(|e| e.to_string())?;
-    let conn = db.connect().map_err(|e| e.to_string())?;
-    let cached = Arc::new(Mutex::new(CachedDb {
-        _db: db,
-        conn,
-        statements: HashMap::new(),
-    }));
+    let cached = Arc::new(CachedDb { db });
     dbs.insert(db_name.to_string(), Arc::clone(&cached));
     Ok(cached)
 }
 
 async fn execute_select(cache: &DbCache, select: Select) -> Result<Vec<Vec<Value>>, String> {
     let cached = get_cached_db(cache, &select.db).await?;
-    let mut cached = cached.lock().await;
+    let conn = cached.db.connect().map_err(|e| e.to_string())?;
     let params: Vec<turso::Value> = select.params.into_iter().map(|v| v.into()).collect();
 
-    // Get or prepare statement
-    if !cached.statements.contains_key(&select.query) {
-        let stmt = cached.conn.prepare(&select.query).await.map_err(|e| e.to_string())?;
-        cached.statements.insert(select.query.clone(), stmt);
-    }
-    let stmt = cached.statements.get_mut(&select.query).unwrap();
-
-    // Reset statement before reuse (query() doesn't do this automatically, unlike execute())
-    stmt.reset();
-
+    let mut stmt = conn.prepare(&select.query).await.map_err(|e| e.to_string())?;
     let mut rows = stmt.query(params).await.map_err(|e| e.to_string())?;
 
     let mut results = Vec::new();
@@ -292,23 +277,17 @@ async fn execute_select(cache: &DbCache, select: Select) -> Result<Vec<Vec<Value
 
 async fn execute_statement(cache: &DbCache, execute: Execute) -> Result<u64, String> {
     let cached = get_cached_db(cache, &execute.db).await?;
-    let mut cached = cached.lock().await;
+    let conn = cached.db.connect().map_err(|e| e.to_string())?;
     let params: Vec<turso::Value> = execute.params.into_iter().map(|v| v.into()).collect();
 
-    // Get or prepare statement
-    if !cached.statements.contains_key(&execute.query) {
-        let stmt = cached.conn.prepare(&execute.query).await.map_err(|e| e.to_string())?;
-        cached.statements.insert(execute.query.clone(), stmt);
-    }
-    let stmt = cached.statements.get_mut(&execute.query).unwrap();
-
+    let mut stmt = conn.prepare(&execute.query).await.map_err(|e| e.to_string())?;
     stmt.execute(params).await.map_err(|e| e.to_string())
 }
 
 async fn run_batch(cache: &DbCache, run: Run) -> Result<(), String> {
     let cached = get_cached_db(cache, &run.db).await?;
-    let cached = cached.lock().await;
-    cached.conn.execute_batch(&run.sql).await.map_err(|e| e.to_string())
+    let conn = cached.db.connect().map_err(|e| e.to_string())?;
+    conn.execute_batch(&run.sql).await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
