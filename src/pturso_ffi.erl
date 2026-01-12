@@ -4,6 +4,8 @@
 -export([
     start/1,
     acquire_binary/0,
+    acquire_from_crates_io/0,
+    acquire_from_github/0,
     stop/1,
     now_ms/0,
     select/4,
@@ -126,13 +128,63 @@ erl_value_to_dynamic({blob, B}) -> B.
 %% Binary acquisition
 %%====================================================================
 
-%% @doc Acquire the erso binary by downloading from GitHub releases.
+%% @doc Acquire erso binary with automatic detection:
+%% 1. Check ERSO env var
+%% 2. Use cargo install if cargo is available
+%% 3. Fall back to GitHub release download
 -spec acquire_binary() -> {ok, binary()} | {error, binary()}.
 acquire_binary() ->
-    CachePath = get_cache_path(),
+    case os:getenv("ERSO") of
+        false ->
+            %% No env var, check for cargo
+            case os:find_executable("cargo") of
+                false ->
+                    %% No cargo, use GitHub
+                    acquire_from_github();
+                _CargoPath ->
+                    %% Cargo available, use crates.io
+                    acquire_from_crates_io()
+            end;
+        EnvPath ->
+            %% ERSO env var set
+            case filelib:is_regular(EnvPath) of
+                true ->
+                    {ok, list_to_binary(EnvPath)};
+                false ->
+                    {error, list_to_binary(io_lib:format(
+                        "ERSO env var points to non-existent file: ~s", [EnvPath]))}
+            end
+    end.
+
+%% @doc Acquire erso from crates.io via cargo install.
+-spec acquire_from_crates_io() -> {ok, binary()} | {error, binary()}.
+acquire_from_crates_io() ->
+    CargoBinPath = get_cargo_bin_path(),
+    case filelib:is_regular(CargoBinPath) of
+        true ->
+            {ok, list_to_binary(CargoBinPath)};
+        false ->
+            %% Not installed, run cargo install
+            case run_cargo_install() of
+                ok ->
+                    case filelib:is_regular(CargoBinPath) of
+                        true ->
+                            {ok, list_to_binary(CargoBinPath)};
+                        false ->
+                            {error, <<"cargo install erso succeeded but binary not found">>}
+                    end;
+                {error, Reason} ->
+                    {error, list_to_binary(io_lib:format(
+                        "Failed to install erso via cargo: ~s", [Reason]))}
+            end
+    end.
+
+%% @doc Acquire erso from GitHub releases.
+-spec acquire_from_github() -> {ok, binary()} | {error, binary()}.
+acquire_from_github() ->
+    CachePath = get_github_cache_path(),
     case filelib:is_regular(CachePath) of
         true ->
-            %% Already downloaded
             {ok, list_to_binary(CachePath)};
         false ->
             case download_from_github(CachePath) of
@@ -140,13 +192,40 @@ acquire_binary() ->
                     {ok, list_to_binary(CachePath)};
                 {error, Reason} ->
                     {error, list_to_binary(io_lib:format(
-                        "Failed to download erso binary from GitHub: ~p",
-                        [Reason]))}
+                        "Failed to download erso from GitHub: ~p", [Reason]))}
             end
     end.
 
-%% Get the cache path for downloaded binary
-get_cache_path() ->
+%% Get the cargo bin path for erso
+get_cargo_bin_path() ->
+    HomeDir = case os:getenv("HOME") of
+        false -> "/tmp";
+        H -> H
+    end,
+    CargoHome = case os:getenv("CARGO_HOME") of
+        false -> filename:join(HomeDir, ".cargo");
+        C -> C
+    end,
+    filename:join([CargoHome, "bin", "erso"]).
+
+%% Run cargo install erso
+run_cargo_install() ->
+    case os:find_executable("cargo") of
+        false ->
+            {error, "cargo not found"};
+        _CargoPath ->
+            %% Run cargo install and capture output
+            Result = os:cmd("cargo install erso 2>&1"),
+            %% Check if installation succeeded by looking for the binary
+            CargoBinPath = get_cargo_bin_path(),
+            case filelib:is_regular(CargoBinPath) of
+                true -> ok;
+                false -> {error, Result}
+            end
+    end.
+
+%% Get the cache path for GitHub-downloaded binary
+get_github_cache_path() ->
     CacheDir = get_cache_dir(),
     filename:join(CacheDir, "erso").
 

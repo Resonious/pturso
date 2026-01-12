@@ -272,7 +272,7 @@ pub fn multiple_insert_via_query_test() {
   pturso.stop(port)
 }
 
-// Test that start() auto-acquires the binary from GitHub releases
+// Test that start() auto-acquires the binary (uses cargo if available, else GitHub)
 pub fn auto_start_test() {
   let assert Ok(port) = pturso.start()
   let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
@@ -282,6 +282,34 @@ pub fn auto_start_test() {
 
   let val_decoder = decode.field(0, decode.int, decode.success)
   let assert Ok([42]) = pturso.query("SELECT val FROM auto_test", on: conn, with: [], expecting: val_decoder)
+
+  pturso.stop(port)
+}
+
+// Test start_from_crates_io (requires cargo to be installed)
+pub fn start_from_crates_io_test() {
+  let assert Ok(port) = pturso.start_from_crates_io()
+  let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
+
+  let assert Ok(Nil) = pturso.exec("CREATE TABLE crates_test (val INTEGER)", on: conn)
+  let assert Ok(Nil) = pturso.exec("INSERT INTO crates_test VALUES (123)", on: conn)
+
+  let val_decoder = decode.field(0, decode.int, decode.success)
+  let assert Ok([123]) = pturso.query("SELECT val FROM crates_test", on: conn, with: [], expecting: val_decoder)
+
+  pturso.stop(port)
+}
+
+// Test start_from_github_release
+pub fn start_from_github_release_test() {
+  let assert Ok(port) = pturso.start_from_github_release()
+  let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
+
+  let assert Ok(Nil) = pturso.exec("CREATE TABLE github_test (val INTEGER)", on: conn)
+  let assert Ok(Nil) = pturso.exec("INSERT INTO github_test VALUES (456)", on: conn)
+
+  let val_decoder = decode.field(0, decode.int, decode.success)
+  let assert Ok([456]) = pturso.query("SELECT val FROM github_test", on: conn, with: [], expecting: val_decoder)
 
   pturso.stop(port)
 }

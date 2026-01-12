@@ -1,6 +1,6 @@
 name = "pturso"
 version = "0.0.0"
-description = "Turso for Gleam via Port (thus the p); not a NIF."
+description = "Turso for Gleam. Similar to the sqlight library, but uses a Port instead of a NIF (so it works fine even for statically linked BEAM builds)."
 licences = ["MIT"]
 repository = { type = "github", user = "Resonious", repo = "pturso" }
 target = "erlang"

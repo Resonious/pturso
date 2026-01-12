@@ -3,7 +3,7 @@ import gleam/result.{try}
 import gleam/dynamic/decode
 import gleam/dynamic.{type Dynamic}
 
-/// Parameter values for queries (needed for bincode encoding)
+/// Parameter values for queries
 pub type Param {
   Null
   Int(Int)
@@ -16,8 +16,11 @@ pub type LogEntry {
   LogEntry(sql: String, duration_ms: Int)
 }
 
+/// Port to external Turso process
 pub type Port
 
+/// Compatibility with sqlight. You can use this type
+/// with `query` and `exec`.
 pub type Connection {
   Connection(
     port: Port,
@@ -34,19 +37,50 @@ pub type Error {
 @external(erlang, "pturso_ffi", "now_ms")
 fn now_ms() -> Int
 
-@external(erlang, "pturso_ffi", "acquire_binary")
-fn acquire_binary() -> Result(String, String)
-
+/// Start by passing in your own path to the `erso` binary.
+/// If you don't know what that is, you should consider using
+/// one of the other `start_*` functions instead.
 @external(erlang, "pturso_ffi", "start")
 pub fn start_with_binary(binary_path: String) -> Result(Port, String)
 
+@external(erlang, "pturso_ffi", "acquire_from_crates_io")
+fn acquire_from_crates_io() -> Result(String, String)
+
+@external(erlang, "pturso_ffi", "acquire_from_github")
+fn acquire_from_github() -> Result(String, String)
+
+@external(erlang, "pturso_ffi", "acquire_binary")
+fn acquire_binary() -> Result(String, String)
+
+/// Start using erso installed via `cargo install erso`.
+/// Calls `cargo install erso` if not already installed,
+/// which builds the Rust binary from source.
+pub fn start_from_crates_io() -> Result(Port, String) {
+  use binary_path <- try(acquire_from_crates_io())
+  start_with_binary(binary_path)
+}
+
+/// Start using pre-built erso binary downloaded from GitHub
+/// releases. Uses cached file on subsequent calls.
+pub fn start_from_github_release() -> Result(Port, String) {
+  use binary_path <- try(acquire_from_github())
+  start_with_binary(binary_path)
+}
+
 /// Start the erso binary, automatically acquiring it if needed.
-/// First tries to build with cargo (if available), then downloads from GitHub releases.
+/// Checks in order:
+/// 1. ERSO environment variable
+/// 2. cargo install (if cargo is available)
+/// 3. GitHub release download
+///
+/// This function is idempotent; if you call it multiple times,
+/// you get the same Port back every time.
 pub fn start() -> Result(Port, String) {
   use binary_path <- try(acquire_binary())
   start_with_binary(binary_path)
 }
 
+/// Stops the external Rust OS process.
 @external(erlang, "pturso_ffi", "stop")
 pub fn stop(conn: Port) -> Nil
 
@@ -82,8 +116,9 @@ pub fn run(conn: Port, db: String, sql: String) -> Result(Nil, String)
 /// Note that this doesn't actually cause a real "connection" to
 /// be created. Actual DB connections are created lazily as
 /// queries come in.
-/// This is useful if you want to use the sqlight-compatible
-/// query and exec functions.
+///
+/// The Connection object primarily exists as a way to make the API
+/// look similar to the sqlight library.
 pub fn connect(port: Port, to db: String, log_with logger_fn: fn(LogEntry) -> Nil) -> Connection {
   Connection(port:, db:, logger_fn:)
 }
