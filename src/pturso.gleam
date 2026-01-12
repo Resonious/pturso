@@ -34,8 +34,18 @@ pub type Error {
 @external(erlang, "pturso_ffi", "now_ms")
 fn now_ms() -> Int
 
+@external(erlang, "pturso_ffi", "acquire_binary")
+fn acquire_binary() -> Result(String, String)
+
 @external(erlang, "pturso_ffi", "start")
-pub fn start(binary_path: String) -> Result(Port, String)
+pub fn start_with_binary(binary_path: String) -> Result(Port, String)
+
+/// Start the erso binary, automatically acquiring it if needed.
+/// First tries to build with cargo (if available), then downloads from GitHub releases.
+pub fn start() -> Result(Port, String) {
+  use binary_path <- try(acquire_binary())
+  start_with_binary(binary_path)
+}
 
 @external(erlang, "pturso_ffi", "stop")
 pub fn stop(conn: Port) -> Nil

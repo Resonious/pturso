@@ -1,5 +1,5 @@
 name = "pturso"
-version = "0.0.1"
+version = "0.0.0"
 description = "Turso for Gleam via Port (thus the p); not a NIF."
 licences = ["MIT"]
 repository = { type = "github", user = "Resonious", repo = "pturso" }

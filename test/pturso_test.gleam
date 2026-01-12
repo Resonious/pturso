@@ -12,7 +12,7 @@ pub fn main() -> Nil {
 const binary_path = "rust/target/debug/erso"
 
 pub fn select_literal_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let assert Ok(rows) = pturso.select(conn, ":memory:", "SELECT 1, 'hello'", [])
 
   let row_decoder = {
@@ -27,14 +27,14 @@ pub fn select_literal_test() {
 }
 
 pub fn create_table_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let assert Ok(_) =
     pturso.execute(conn, ":memory:", "CREATE TABLE test (id INTEGER, name TEXT)", [])
   pturso.stop(conn)
 }
 
 pub fn insert_and_select_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let assert Ok(_) =
     pturso.execute(conn, ":memory:", "CREATE TABLE users (id INTEGER, name TEXT)", [])
   let assert Ok(_) =
@@ -57,7 +57,7 @@ pub fn insert_and_select_test() {
 }
 
 pub fn null_values_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let assert Ok(_) =
     pturso.execute(conn, ":memory:", "CREATE TABLE nullable (val TEXT)", [])
   let assert Ok(_) =
@@ -76,7 +76,7 @@ pub fn null_values_test() {
 }
 
 pub fn multiple_types_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let assert Ok(_) =
     pturso.execute(
       conn,
@@ -117,7 +117,7 @@ pub fn multiple_types_test() {
 }
 
 pub fn multiple_rows_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let assert Ok(_) =
     pturso.execute(
       conn,
@@ -158,14 +158,14 @@ pub fn multiple_rows_test() {
 }
 
 pub fn error_handling_test() {
-  let assert Ok(conn) = pturso.start(binary_path)
+  let assert Ok(conn) = pturso.start_with_binary(binary_path)
   let result = pturso.select(conn, ":memory:", "SELECT * FROM nonexistent_table", [])
   should.be_error(result)
   pturso.stop(conn)
 }
 
 pub fn run_multiple_statements_test() {
-  let assert Ok(port) = pturso.start(binary_path)
+  let assert Ok(port) = pturso.start_with_binary(binary_path)
 
   // Run multiple statements in a single call
   let assert Ok(Nil) =
@@ -200,7 +200,7 @@ pub fn run_multiple_statements_test() {
 }
 
 pub fn exec_with_connection_test() {
-  let assert Ok(port) = pturso.start(binary_path)
+  let assert Ok(port) = pturso.start_with_binary(binary_path)
   let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
 
   // Use exec to run multiple statements
@@ -231,7 +231,7 @@ pub fn exec_with_connection_test() {
 // Regression test: multiple query() calls for INSERT should all run
 // This was a bug where stmt.reset() wasn't called before query()
 pub fn multiple_insert_via_query_test() {
-  let assert Ok(port) = pturso.start(binary_path)
+  let assert Ok(port) = pturso.start_with_binary(binary_path)
   let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
 
   // Create table
@@ -269,5 +269,19 @@ pub fn multiple_insert_via_query_test() {
     pturso.query("SELECT id, value FROM items ORDER BY id", on: conn, with: [], expecting: item_decoder)
 
   should.equal(items, [#(1, "first"), #(2, "second"), #(3, "third")])
+  pturso.stop(port)
+}
+
+// Test that start() auto-acquires the binary from GitHub releases
+pub fn auto_start_test() {
+  let assert Ok(port) = pturso.start()
+  let conn = pturso.connect(port, to: ":memory:", log_with: fn(_) { Nil })
+
+  let assert Ok(Nil) = pturso.exec("CREATE TABLE auto_test (val INTEGER)", on: conn)
+  let assert Ok(Nil) = pturso.exec("INSERT INTO auto_test VALUES (42)", on: conn)
+
+  let val_decoder = decode.field(0, decode.int, decode.success)
+  let assert Ok([42]) = pturso.query("SELECT val FROM auto_test", on: conn, with: [], expecting: val_decoder)
+
   pturso.stop(port)
 }
