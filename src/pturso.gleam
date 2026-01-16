@@ -1,3 +1,4 @@
+import gleam/option
 import gleam/list
 import gleam/result.{try}
 import gleam/dynamic/decode
@@ -32,6 +33,11 @@ pub type Connection {
 pub type Error {
   DatabaseError(message: String)
   DecodeError(errors: List(decode.DecodeError))
+}
+
+pub fn nullable(decoder: decode.Decoder(Param)) -> decode.Decoder(Param) {
+  decode.optional(decoder)
+  |> decode.map(option.unwrap(_, Null))
 }
 
 @external(erlang, "pturso_ffi", "now_ms")
