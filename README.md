@@ -7,7 +7,7 @@
 
 Since this uses ports, it works with [erlang-linux-builds](https://github.com/gleam-community/erlang-linux-builds).
 
-The API is similar to that of [sqlight](https://github.com/lpil/sqlight) which means it also plays nicely with [parrot](github.com/daniellionel01/parrot).
+The API is similar to that of [sqlight](https://github.com/lpil/sqlight) which means it also plays nicely with [parrot](https://www.github.com/daniellionel01/parrot).
 
 Currently this only works for the Erlang target. Turso technically does run in wasm, so we could support JS theoretically but I haven't had the need yet!
 
